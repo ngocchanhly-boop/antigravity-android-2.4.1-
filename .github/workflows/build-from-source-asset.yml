@@ -1,0 +1,64 @@
+name: Build APK from source archive
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: startsWith(github.event.release.tag_name, 'source-v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android build utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aapt zipalign apksigner file zip unzip gzip
+
+      - name: Download source archive attached to this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/source
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "antigravity-android-2.4.1.zip" \
+            --dir /tmp/source
+          unzip -q /tmp/source/antigravity-android-2.4.1.zip -d /tmp/source
+          test -f /tmp/source/antigravity-android-2.4.1/build.sh
+
+      - name: Build standard APK
+        working-directory: /tmp/source/antigravity-android-2.4.1
+        run: bash build.sh
+
+      - name: Build region-bypass APK
+        working-directory: /tmp/source/antigravity-android-2.4.1
+        run: bash build.sh --region-bypass
+
+      - name: Generate checksums
+        working-directory: /tmp/source/antigravity-android-2.4.1
+        run: |
+          cd dist
+          sha256sum antigravity.apk antigravity-region-bypass.apk > SHA256SUMS.txt
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: antigravity-apks
+          path: |
+            /tmp/source/antigravity-android-2.4.1/dist/antigravity.apk
+            /tmp/source/antigravity-android-2.4.1/dist/antigravity-region-bypass.apk
+            /tmp/source/antigravity-android-2.4.1/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
