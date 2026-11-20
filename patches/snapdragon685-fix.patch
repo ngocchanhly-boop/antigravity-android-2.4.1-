@@ -1,0 +1,132 @@
+--- a/app/src/main/java/com/agy/core/CoreEnvironment.java
++++ b/app/src/main/java/com/agy/core/CoreEnvironment.java
+@@ -16,6 +16,7 @@
+     }
+ 
+     public static void apply(RuntimeManager rm, ProcessBuilder pb) {
++
+         File files = rm.appContext().getFilesDir();
+         File bin = rm.getBinDir();
+         Map<String, String> env = pb.environment();
+@@ -54,10 +55,17 @@
+         env.put("LANG", "C.UTF-8");
+         env.put("LC_ALL", "C.UTF-8");
+ 
+-        // Pure-Go resolver keeps DNS independent of Android's missing /etc.
++        // Keep Go's resolver independent of Android's missing /etc and disable
++        // optional ARM64 instructions that can be misreported by some Android
++        // kernels/firmware. The glibc compatibility preload handles LSE atomics
++        // in native code; these flags cover Go runtime CPU-feature dispatch.
+         String godebug = env.get("GODEBUG");
+-        env.put("GODEBUG", godebug == null || godebug.isEmpty()
+-                ? "netdns=go" : godebug + ",netdns=go");
++        godebug = setGodebugOption(godebug, "netdns=go");
++        godebug = setGodebugOption(godebug, "cpu.atomics=off");
++        godebug = setGodebugOption(godebug, "cpu.sha512=off");
++        godebug = setGodebugOption(godebug, "cpu.sha3=off");
++        godebug = setGodebugOption(godebug, "cpu.asimddp=off");
++        env.put("GODEBUG", godebug);
+         // Emits "ANTIGRAVITY_OPEN_URL: <url>" directly to stdout from language_server
+         // so OpenUrlWatcher captures the auth URL and opens the external browser reliably.
+         env.put("ANTIGRAVITY_VSCODE_HOST", "1");
+@@ -79,4 +87,22 @@
+         // glibc loader's CLI argument: --preload <path>/liblse_compat.so.
+         env.remove("LD_PRELOAD");
+     }
++    /** Replace a GODEBUG key instead of leaving conflicting inherited values. */
++    private static String setGodebugOption(String current, String option) {
++        String key = option.substring(0, option.indexOf('='));
++        StringBuilder result = new StringBuilder();
++        if (current != null && !current.isEmpty()) {
++            for (String item : current.split(",")) {
++                String trimmed = item.trim();
++                if (!trimmed.isEmpty() && !trimmed.startsWith(key + "=")) {
++                    if (result.length() > 0) result.append(',');
++                    result.append(trimmed);
++                }
++            }
++        }
++        if (result.length() > 0) result.append(',');
++        result.append(option);
++        return result.toString();
++    }
++
+ }
+--- a/app/src/main/java/com/agy/core/CoreRestartPolicy.java
++++ b/app/src/main/java/com/agy/core/CoreRestartPolicy.java
+@@ -6,10 +6,21 @@
+     /** Uptime that proves the core is stable and refills the restart budget. */
+     public static final long SUSTAINED_READY_MS = 60000;
+     public static final int MAX_RESTARTS = 3;
++    /** Bounded retries for signal-terminated launches that die before readiness. */
++    public static final int MAX_EARLY_RESTARTS = 5;
+     public static final long RESTART_BASE_MS = 1000;
+     public static final long RESTART_MAX_MS = 30000;
+ 
+     private CoreRestartPolicy() {
++    }
++
++    /**
++     * Java Process exit values commonly encode signal termination as 128 + signal.
++     * Limit this classification to the Linux signal range to avoid retrying
++     * ordinary application exit codes indefinitely.
++     */
++    public static boolean isSignalExit(int exitCode) {
++        return exitCode >= 129 && exitCode <= 192;
+     }
+ 
+     public static long delayFor(int attempt) {
+--- a/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
++++ b/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
+@@ -75,6 +75,7 @@
+ 
+     private void runCoreLoop() {
+         int attempt = 0;
++        int earlySignalAttempt = 0;
+         while (!stopping) {
+             Writer log = CoreLogWriter.open(appContext.getFilesDir());
+             try {
+@@ -92,16 +93,42 @@
+                     if (stopping) {
+                         break;
+                     }
+-                    // Ready timeout / launch death is fatal: no blind auto-restart.
++                    int earlyExitCode = ProcessUtils.exitCode(proc);
++                    if (!ProcessUtils.isAlive(proc)
++                            && CoreRestartPolicy.isSignalExit(earlyExitCode)
++                            && earlySignalAttempt < CoreRestartPolicy.MAX_EARLY_RESTARTS) {
++                        earlySignalAttempt++;
++                        long delay = CoreRestartPolicy.delayFor(earlySignalAttempt);
++                        String earlyError = "core exited before readiness from signal (code "
++                                + earlyExitCode + "); retrying in " + (delay / 1000) + "s (early attempt "
++                                + earlySignalAttempt + "/" + CoreRestartPolicy.MAX_EARLY_RESTARTS + ")";
++                        CoreRuntimeState.serverUrl = null;
++                        CoreRuntimeState.restarting = true;
++                        CoreRuntimeState.lastError = earlyError;
++                        Log.w(TAG, earlyError);
++                        CoreLogWriter.writeLine(log, earlyError);
++                        destroy(proc);
++                        CoreLogWriter.closeQuietly(log);
++                        log = null;
++                        sleepInterruptible(delay);
++                        continue;
++                    }
++                    // A readiness timeout or a non-signal launch failure remains fatal.
+                     if (CoreRuntimeState.lastError == null) {
+                         CoreRuntimeState.lastError =
+                                 "core did not become ready within " + CoreReadyProbe.READY_TIMEOUT_MS + "ms";
+                         CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
++                    } else if (!ProcessUtils.isAlive(proc)
++                            && CoreRestartPolicy.isSignalExit(earlyExitCode)) {
++                        CoreRuntimeState.lastError += "\nmaximum early signal retries reached ("
++                                + CoreRestartPolicy.MAX_EARLY_RESTARTS + ")";
++                        CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
+                     }
+                     destroy(proc);
+                     break;
+                 }
+ 
++                earlySignalAttempt = 0;
+                 long readyAt = System.currentTimeMillis();
+                 try {
+                     proc.waitFor();
