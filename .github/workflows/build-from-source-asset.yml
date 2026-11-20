@@ -1,6 +1,12 @@
-name: Build APK from source archive
+name: Build patched APK from source archive
 
 on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag of the source release containing antigravity-android-2.4.1.zip"
+        required: true
+        default: "source-v2.4.1"
   release:
     types: [published]
 
@@ -9,10 +15,10 @@ permissions:
 
 jobs:
   build:
-    if: startsWith(github.event.release.tag_name, 'source-v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'source-v')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout workflow repository
+      - name: Checkout workflow and patch
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -24,19 +30,26 @@ jobs:
       - name: Install Android build utilities
         run: |
           sudo apt-get update
-          sudo apt-get install -y aapt zipalign apksigner file zip unzip gzip
+          sudo apt-get install -y aapt zipalign apksigner file zip unzip gzip patch
 
-      - name: Download source archive attached to this release
+      - name: Download source archive attached to release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
         run: |
           mkdir -p /tmp/source
-          gh release download "${GITHUB_REF_NAME}" \
+          gh release download "$RELEASE_TAG" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern "antigravity-android-2.4.1.zip" \
             --dir /tmp/source
           unzip -q /tmp/source/antigravity-android-2.4.1.zip -d /tmp/source
           test -f /tmp/source/antigravity-android-2.4.1/build.sh
+
+      - name: Apply and verify Snapdragon 685 stability patch
+        working-directory: /tmp/source/antigravity-android-2.4.1
+        run: |
+          git apply --check "${GITHUB_WORKSPACE}/patches/snapdragon685-fix.patch"
+          git apply "${GITHUB_WORKSPACE}/patches/snapdragon685-fix.patch"
 
       - name: Build standard APK
         working-directory: /tmp/source/antigravity-android-2.4.1
@@ -52,10 +65,10 @@ jobs:
           cd dist
           sha256sum antigravity.apk antigravity-region-bypass.apk > SHA256SUMS.txt
 
-      - name: Upload APK artifacts
+      - name: Upload patched APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: antigravity-apks
+          name: antigravity-apks-snapdragon685-patched
           path: |
             /tmp/source/antigravity-android-2.4.1/dist/antigravity.apk
             /tmp/source/antigravity-android-2.4.1/dist/antigravity-region-bypass.apk
