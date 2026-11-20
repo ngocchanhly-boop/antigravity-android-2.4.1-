@@ -1,6 +1,6 @@
 --- a/app/src/main/java/com/agy/core/CoreRestartPolicy.java
 +++ b/app/src/main/java/com/agy/core/CoreRestartPolicy.java
-@@ -6,10 +6,16 @@
+@@ -6,11 +6,17 @@
      /** Uptime that proves the core is stable and refills the restart budget. */
      public static final long SUSTAINED_READY_MS = 60000;
      public static final int MAX_RESTARTS = 3;
@@ -68,7 +68,7 @@ diff --git a/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java b/app/sr
 index 3f82678..4e03bcb 100644
 --- a/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
 +++ b/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
-@@ -55,11 +55,13 @@
+@@ -55,11 +55,14 @@
          Log.i(TAG, "shouldOverrideUrlLoading url="
                  + SensitiveDataRedactor.safeUrl(uri.toString()));
          if (!request.isForMainFrame()) {
