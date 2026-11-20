@@ -68,7 +68,7 @@ diff --git a/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java b/app/sr
 index 3f82678..4e03bcb 100644
 --- a/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
 +++ b/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
-@@ -55,11 +55,14 @@
+@@ -55,11 +55,13 @@
          Log.i(TAG, "shouldOverrideUrlLoading url="
                  + SensitiveDataRedactor.safeUrl(uri.toString()));
          if (!request.isForMainFrame()) {
