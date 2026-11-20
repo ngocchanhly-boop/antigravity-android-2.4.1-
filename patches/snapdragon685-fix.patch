@@ -63,3 +63,26 @@
                  long readyAt = System.currentTimeMillis();
                  try {
                      proc.waitFor();
+
+diff --git a/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java b/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
+index 3f82678..4e03bcb 100644
+--- a/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
++++ b/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
+@@ -55,11 +55,14 @@
+         Log.i(TAG, "shouldOverrideUrlLoading url="
+                 + SensitiveDataRedactor.safeUrl(uri.toString()));
+         if (!request.isForMainFrame()) {
+-            // The web UI intentionally embeds HTTPS previews. Keep those working,
+-            // while refusing file/javascript/intent and other non-web subframes.
++            // Artifact previews may be rendered from blob: or data: URLs. The
++            // app CSP explicitly permits these frame sources, so do not block them
++            // here. Continue rejecting file:, javascript:, intent:, and unknown schemes.
+             String scheme = uri.getScheme();
+             return !"https".equalsIgnoreCase(scheme)
+-                    && !"about".equalsIgnoreCase(scheme);
++                    && !"about".equalsIgnoreCase(scheme)
++                    && !"blob".equalsIgnoreCase(scheme)
++                    && !"data".equalsIgnoreCase(scheme);
+         }
+         return handleNavigation(v, uri.toString());
+     }
