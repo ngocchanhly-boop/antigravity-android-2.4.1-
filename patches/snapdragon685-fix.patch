@@ -1,82 +1,84 @@
---- a/app/src/main/java/com/agy/core/CoreRestartPolicy.java
-+++ b/app/src/main/java/com/agy/core/CoreRestartPolicy.java
-@@ -6,11 +6,17 @@
-     /** Uptime that proves the core is stable and refills the restart budget. */
-     public static final long SUSTAINED_READY_MS = 60000;
-     public static final int MAX_RESTARTS = 3;
-+    /** Bounded retries for signal-terminated launches that die before readiness. */
-+    public static final int MAX_EARLY_RESTARTS = 5;
-     public static final long RESTART_BASE_MS = 1000;
-     public static final long RESTART_MAX_MS = 30000;
- 
-     private CoreRestartPolicy() {
-+    }
-+
-+    public static boolean isSignalExit(int exitCode) {
-+        return exitCode >= 129 && exitCode <= 192;
-     }
- 
-     public static long delayFor(int attempt) {
+diff --git a/app/src/main/java/com/agy/core/CoreProcessSupervisor.java b/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
+index 4a102d3..d57c831 100644
 --- a/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
 +++ b/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
-@@ -75,6 +75,7 @@
- 
+@@ -75,6 +75,7 @@ public final class CoreProcessSupervisor {
+
      private void runCoreLoop() {
          int attempt = 0;
-+        int earlySignalAttempt = 0;
++        int earlyRestarts = 0;
          while (!stopping) {
              Writer log = CoreLogWriter.open(appContext.getFilesDir());
              try {
-@@ -92,7 +93,26 @@
+@@ -92,6 +93,27 @@ public final class CoreProcessSupervisor.java
                      if (stopping) {
                          break;
                      }
--                    // Ready timeout / launch death is fatal: no blind auto-restart.
-+                    int earlyExitCode = ProcessUtils.exitCode(proc);
-+                    if (!ProcessUtils.isAlive(proc)
-+                            && CoreRestartPolicy.isSignalExit(earlyExitCode)
-+                            && earlySignalAttempt < CoreRestartPolicy.MAX_EARLY_RESTARTS) {
-+                        earlySignalAttempt++;
-+                        long delay = CoreRestartPolicy.delayFor(earlySignalAttempt);
-+                        String earlyError = "core exited before readiness from signal (code "
-+                                + earlyExitCode + "); retrying in " + (delay / 1000) + "s (early attempt "
-+                                + earlySignalAttempt + "/" + CoreRestartPolicy.MAX_EARLY_RESTARTS + ")";
-+                        CoreRuntimeState.serverUrl = null;
++                    // Killed by a signal before ready (e.g. OS killed the process):
++                    // retry a limited number of times instead of failing at once.
++                    int earlyCode = ProcessUtils.isAlive(proc)
++                            ? 0 : ProcessUtils.exitCode(proc);
++                    if (CoreRestartPolicy.isSignalExit(earlyCode)
++                            && earlyRestarts < CoreRestartPolicy.MAX_EARLY_RESTARTS) {
++                        earlyRestarts++;
++                        long earlyDelay = CoreRestartPolicy.delayFor(earlyRestarts);
 +                        CoreRuntimeState.restarting = true;
-+                        CoreRuntimeState.lastError = earlyError;
-+                        Log.w(TAG, earlyError);
-+                        CoreLogWriter.writeLine(log, earlyError);
++                        CoreRuntimeState.lastError = "core was killed by a signal before it was ready"
++                                + " (exit code " + earlyCode + "); retrying in "
++                                + (earlyDelay / 1000) + "s (early attempt " + earlyRestarts
++                                + "/" + CoreRestartPolicy.MAX_EARLY_RESTARTS + ")";
++                        Log.w(TAG, CoreRuntimeState.lastError);
++                        CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
 +                        destroy(proc);
 +                        CoreLogWriter.closeQuietly(log);
 +                        log = null;
-+                        sleepInterruptible(delay);
++                        sleepInterruptible(earlyDelay);
 +                        continue;
 +                    }
+                     // Ready timeout / launch death is fatal: no blind auto-restart.
                      if (CoreRuntimeState.lastError == null) {
                          CoreRuntimeState.lastError =
-                                 "core did not become ready within " + CoreReadyProbe.READY_TIMEOUT_MS + "ms";
-@@ -102,6 +122,7 @@
-                     break;
-                 }
- 
-+                earlySignalAttempt = 0;
-                 long readyAt = System.currentTimeMillis();
-                 try {
-                     proc.waitFor();
+diff --git a/app/src/main/java/com/agy/core/CoreRestartPolicy.java b/app/src/main/java/com/agy/core/CoreRestartPolicy.java
+index 8b528dd..2db3edb 100644
+--- a/app/src/main/java/com/agy/core/CoreRestartPolicy.java
++++ b/app/src/main/java/com/agy/core/CoreRestartPolicy.java
+@@ -6,6 +6,8 @@ public final class CoreRestartPolicy {
+     /** Uptime that proves the core is stable and refills the restart budget. */
+     public static final long SUSTAINED_READY_MS = 60000;
+     public static final int MAX_RESTARTS = 3;
++    /** Extra retries allowed when the core is killed by a signal before it is ready. */
++    public static final int MAX_EARLY_RESTARTS = 2;
+     public static final long RESTART_BASE_MS = 1000;
+     public static final long RESTART_MAX_MS = 30000;
 
+@@ -16,4 +18,12 @@ public final class CoreRestartPolicy {
+
+     public static long delayFor(int attempt) {
+         int shift = Math.min(attempt - 1, 5);
+         return Math.min(RESTART_BASE_MS << shift, RESTART_MAX_MS);
+     }
++
++    /**
++     * True when an exit code means the process was killed by a signal
++     * (128 + signal number, or a negative value on some runtimes).
++     */
++    public static boolean isSignalExit(int code) {
++        return code < 0 || (code > 128 && code < 160);
++    }
+ }
 diff --git a/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java b/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
-index 3f82678..4e03bcb 100644
+index 3f82678..78cb1a0 100644
 --- a/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
 +++ b/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
-@@ -55,11 +55,14 @@
+@@ -55,11 +55,14 @@ public final class AgyWebViewClient extends WebViewClient {
          Log.i(TAG, "shouldOverrideUrlLoading url="
                  + SensitiveDataRedactor.safeUrl(uri.toString()));
          if (!request.isForMainFrame()) {
 -            // The web UI intentionally embeds HTTPS previews. Keep those working,
 -            // while refusing file/javascript/intent and other non-web subframes.
-+            // Artifact previews may be rendered from blob: or data: URLs. The
-+            // app CSP explicitly permits these frame sources, so do not block them
-+            // here. Continue rejecting file:, javascript:, intent:, and unknown schemes.
++            // The web UI intentionally embeds HTTPS previews and Artifact iframes
++            // (blob:/data:, allowed by the page CSP). Keep those working, while
++            // refusing file/javascript/intent and other non-web subframes.
              String scheme = uri.getScheme();
              return !"https".equalsIgnoreCase(scheme)
 -                    && !"about".equalsIgnoreCase(scheme);
