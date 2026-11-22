@@ -1,5 +1,5 @@
 diff --git a/app/src/main/java/com/agy/core/CoreProcessSupervisor.java b/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
-index 4a102d3..d57c831 100644
+index 4a102d3..73a4298 100644
 --- a/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
 +++ b/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
 @@ -75,6 +75,7 @@ public final class CoreProcessSupervisor {
@@ -38,6 +38,20 @@ index 4a102d3..d57c831 100644
                      // Ready timeout / launch death is fatal: no blind auto-restart.
                      if (CoreRuntimeState.lastError == null) {
                          CoreRuntimeState.lastError =
+@@ -108,6 +130,13 @@ public final class CoreProcessSupervisor {
+                 } catch (InterruptedException ie) {
+                     Thread.currentThread().interrupt();
+                 }
++                // Let the stream thread drain the last stderr lines (for example the
++                // "[lse_compat] FATAL ... INSN=..." line) before the log tail is read.
++                try {
++                    streamer.join(1500);
++                } catch (InterruptedException ie) {
++                    Thread.currentThread().interrupt();
++                }
+                 if (stopping) {
+                     break;
+                 }
 diff --git a/app/src/main/java/com/agy/core/CoreRestartPolicy.java b/app/src/main/java/com/agy/core/CoreRestartPolicy.java
 index 8b528dd..2db3edb 100644
 --- a/app/src/main/java/com/agy/core/CoreRestartPolicy.java
@@ -86,4 +100,18 @@ index 3f82678..78cb1a0 100644
          }
          return handleNavigation(v, uri.toString());
      }
-     
+diff --git a/app/src/main/java/com/agy/ui/webview/AppHtmlInjector.java b/app/src/main/java/com/agy/ui/webview/AppHtmlInjector.java
+index c70eca9..65edac4 100644
+--- a/app/src/main/java/com/agy/ui/webview/AppHtmlInjector.java
++++ b/app/src/main/java/com/agy/ui/webview/AppHtmlInjector.java
+@@ -15,7 +15,8 @@ public final class AppHtmlInjector {
+     /** Web layer generates the ready signal under generated/patches. */
+     private static final String READY_SCRIPT = "./generated/patches/startup_ready.js";
+     private static final String CSP = "default-src 'self' https: data: blob:; "
+-            + "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; "
++            + "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: "
++            + "https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js; "
+             + "style-src 'self' 'unsafe-inline' https:; "
+             + "img-src 'self' https: data: blob:; font-src 'self' https: data:; "
+             + "connect-src 'self' https: wss:; frame-src https: data: blob:; "
+             
