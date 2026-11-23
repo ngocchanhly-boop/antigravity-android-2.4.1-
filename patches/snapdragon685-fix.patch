@@ -1,5 +1,5 @@
 diff --git a/app/src/main/java/com/agy/core/CoreLogWriter.java b/app/src/main/java/com/agy/core/CoreLogWriter.java
-index 15128a6..39dbb1f 100644
+index 15128a6..c84e219 100644
 --- a/app/src/main/java/com/agy/core/CoreLogWriter.java
 +++ b/app/src/main/java/com/agy/core/CoreLogWriter.java
 @@ -22,7 +22,15 @@ public final class CoreLogWriter {
@@ -20,7 +20,7 @@ index 15128a6..39dbb1f 100644
          } catch (Exception e) {
              Log.w(TAG, "cannot open core log", e);
 diff --git a/app/src/main/java/com/agy/core/CoreProcessSupervisor.java b/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
-index 4a102d3..73a4298 100644
+index 4a102d3..9d31f0a 100644
 --- a/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
 +++ b/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
 @@ -75,6 +75,7 @@ public final class CoreProcessSupervisor {
@@ -31,10 +31,14 @@ index 4a102d3..73a4298 100644
          while (!stopping) {
              Writer log = CoreLogWriter.open(appContext.getFilesDir());
              try {
-@@ -92,6 +93,27 @@ public final class CoreProcessSupervisor {
+@@ -92,15 +93,53 @@ public final class CoreProcessSupervisor {
                      if (stopping) {
                          break;
                      }
++                    // Wait briefly if process is dying so exitCode reflects the signal.
++                    if (ProcessUtils.isAlive(proc)) {
++                        sleepInterruptible(150);
++                    }
 +                    // Killed by a signal before ready (e.g. OS killed the process):
 +                    // retry a limited number of times instead of failing at once.
 +                    int earlyCode = ProcessUtils.isAlive(proc)
@@ -49,17 +53,41 @@ index 4a102d3..73a4298 100644
 +                                + (earlyDelay / 1000) + "s (early attempt " + earlyRestarts
 +                                + "/" + CoreRestartPolicy.MAX_EARLY_RESTARTS + ")";
 +                        Log.w(TAG, CoreRuntimeState.lastError);
-+                        CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
 +                        destroy(proc);
++                        try {
++                            streamer.join(1500);
++                        } catch (InterruptedException ie) {
++                            Thread.currentThread().interrupt();
++                        }
++                        CoreLogWriter.writeLine(log, CoreRuntimeState.lastError);
 +                        CoreLogWriter.closeQuietly(log);
 +                        log = null;
 +                        sleepInterruptible(earlyDelay);
 +                        continue;
 +                    }
++                    CoreRuntimeState.restarting = false;
++                    if (earlyRestarts > 0) {
++                        CoreRuntimeState.lastError = null;
++                    }
                      // Ready timeout / launch death is fatal: no blind auto-restart.
                      if (CoreRuntimeState.lastError == null) {
                          CoreRuntimeState.lastError =
-@@ -108,6 +130,13 @@ public final class CoreProcessSupervisor {
+                                 "core failed to become ready (exit code " + earlyCode + ")";
+                     }
+                     destroy(proc);
++                    try {
++                        streamer.join(1500);
++                    } catch (InterruptedException ie) {
++                        Thread.currentThread().interrupt();
++                    }
+                     break;
+                 }
++                earlyRestarts = 0;
++                CoreRuntimeState.restarting = false;
+                 long readyAt = System.currentTimeMillis();
+                 try {
+                     proc.waitFor();
+@@ -108,6 +147,13 @@ public final class CoreProcessSupervisor {
                  } catch (InterruptedException ie) {
                      Thread.currentThread().interrupt();
                  }
@@ -74,10 +102,10 @@ index 4a102d3..73a4298 100644
                      break;
                  }
 diff --git a/app/src/main/java/com/agy/core/CoreRestartPolicy.java b/app/src/main/java/com/agy/core/CoreRestartPolicy.java
-index 8b528dd..2db3edb 100644
+index 8b528dd..f12a84c 100644
 --- a/app/src/main/java/com/agy/core/CoreRestartPolicy.java
 +++ b/app/src/main/java/com/agy/core/CoreRestartPolicy.java
-@@ -6,6 +6,8 @@ public final class CoreRestartPolicy {
+@@ -6,14 +6,24 @@ public final class CoreRestartPolicy {
      /** Uptime that proves the core is stable and refills the restart budget. */
      public static final long SUSTAINED_READY_MS = 60000;
      public static final int MAX_RESTARTS = 3;
@@ -86,8 +114,11 @@ index 8b528dd..2db3edb 100644
      public static final long RESTART_BASE_MS = 1000;
      public static final long RESTART_MAX_MS = 30000;
  
-@@ -16,4 +18,12 @@ public final class CoreRestartPolicy {
-         int shift = Math.min(attempt - 1, 5);
+     private CoreRestartPolicy() {}
+ 
+     public static long delayFor(int attempt) {
+-        int shift = Math.min(attempt - 1, 5);
++        int shift = Math.min(Math.max(attempt - 1, 0), 5);
          return Math.min(RESTART_BASE_MS << shift, RESTART_MAX_MS);
      }
 +
@@ -100,39 +131,46 @@ index 8b528dd..2db3edb 100644
 +    }
  }
 diff --git a/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java b/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
-index 3f82678..78cb1a0 100644
+index 3f82678..d18c409 100644
 --- a/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
 +++ b/app/src/main/java/com/agy/ui/webview/AgyWebViewClient.java
-@@ -55,11 +55,14 @@ public final class AgyWebViewClient extends WebViewClient {
+@@ -55,11 +55,18 @@ public final class AgyWebViewClient extends WebViewClient {
          Log.i(TAG, "shouldOverrideUrlLoading url="
                  + SensitiveDataRedactor.safeUrl(uri.toString()));
          if (!request.isForMainFrame()) {
 -            // The web UI intentionally embeds HTTPS previews. Keep those working,
 -            // while refusing file/javascript/intent and other non-web subframes.
-+            // The web UI intentionally embeds HTTPS previews and Artifact iframes
-+            // (blob:/data:, allowed by the page CSP). Keep those working, while
-+            // refusing file/javascript/intent and other non-web subframes.
++            // The web UI intentionally embeds HTTPS previews, loopback subframes,
++            // and Artifact iframes (blob:/data:, allowed by the page CSP). Keep those
++            // working, while refusing file/javascript/intent and other non-web subframes.
              String scheme = uri.getScheme();
++            String host = uri.getHost();
++            boolean isLoopbackHttp = "http".equalsIgnoreCase(scheme)
++                    && ("127.0.0.1".equals(host) || "localhost".equalsIgnoreCase(host));
              return !"https".equalsIgnoreCase(scheme)
 -                    && !"about".equalsIgnoreCase(scheme);
 +                    && !"about".equalsIgnoreCase(scheme)
 +                    && !"blob".equalsIgnoreCase(scheme)
-+                    && !"data".equalsIgnoreCase(scheme);
++                    && !"data".equalsIgnoreCase(scheme)
++                    && !isLoopbackHttp;
          }
          return handleNavigation(v, uri.toString());
      }
 diff --git a/app/src/main/java/com/agy/ui/webview/AppHtmlInjector.java b/app/src/main/java/com/agy/ui/webview/AppHtmlInjector.java
-index c70eca9..65edac4 100644
+index c70eca9..7e21d3b 100644
 --- a/app/src/main/java/com/agy/ui/webview/AppHtmlInjector.java
 +++ b/app/src/main/java/com/agy/ui/webview/AppHtmlInjector.java
-@@ -15,7 +15,8 @@ public final class AppHtmlInjector {
+@@ -15,7 +15,10 @@ public final class AppHtmlInjector {
      /** Web layer generates the ready signal under generated/patches. */
      private static final String READY_SCRIPT = "./generated/patches/startup_ready.js";
      private static final String CSP = "default-src 'self' https: data: blob:; "
 -            + "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; "
-+            + "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: "
+-            + "style-src 'self' 'unsafe-inline' https:; "
++            + "script-src 'self' 'unsafe-inline' 'unsafe-eval' https: data: blob: "
 +            + "https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js; "
-             + "style-src 'self' 'unsafe-inline' https:; "
++            + "style-src 'self' 'unsafe-inline' https: data: blob:; "
++            + "worker-src 'self' blob: data:; media-src 'self' https: data: blob:; "
              + "img-src 'self' https: data: blob:; font-src 'self' https: data:; "
-             + "connect-src 'self' https: wss:; frame-src https: data: blob:; "
-             
+-            + "connect-src 'self' https: wss:; frame-src https: data: blob:; "
++            + "connect-src 'self' https: wss: data: blob:; "
++            + "frame-src 'self' https: http://127.0.0.1:* http://localhost:* data: blob:; "
