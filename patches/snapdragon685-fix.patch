@@ -1,3 +1,24 @@
+diff --git a/app/src/main/java/com/agy/core/CoreLogWriter.java b/app/src/main/java/com/agy/core/CoreLogWriter.java
+index 15128a6..39dbb1f 100644
+--- a/app/src/main/java/com/agy/core/CoreLogWriter.java
++++ b/app/src/main/java/com/agy/core/CoreLogWriter.java
+@@ -22,7 +22,15 @@ public final class CoreLogWriter {
+         try {
+             File dir = new File(filesDir, "logs");
+             dir.mkdirs();
+-            return new OutputStreamWriter(new FileOutputStream(new File(dir, "core.log"), false),
++            File logFile = new File(dir, "core.log");
++            // Keep the previous run's lines (a crash leaves its last stderr line there)
++            // and only rotate the file once it gets large.
++            if (logFile.length() > 1024L * 1024L) {
++                File old = new File(dir, "core.log.old");
++                old.delete();
++                logFile.renameTo(old);
++            }
++            return new OutputStreamWriter(new FileOutputStream(logFile, true),
+                     Charset.forName("UTF-8"));
+         } catch (Exception e) {
+             Log.w(TAG, "cannot open core log", e);
 diff --git a/app/src/main/java/com/agy/core/CoreProcessSupervisor.java b/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
 index 4a102d3..73a4298 100644
 --- a/app/src/main/java/com/agy/core/CoreProcessSupervisor.java
